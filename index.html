@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Проверка диктантов</title>
+  <meta name="description" content="Электронный журнал с проверкой диктантов с помощью ИИ (Google Gemini)">
+  <meta name="theme-color" content="#2f4fb5">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f4fb5'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>
+        </span>
+        <span class="brand-name" data-i18n="appName"></span>
+      </a>
+      <nav class="nav">
+        <a href="#/" data-nav="groups" data-i18n="groups"></a>
+        <a href="#/settings" data-nav="settings" data-i18n="settings"></a>
+      </nav>
+      <div class="tools">
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" data-lang="ru">RU</button>
+          <button type="button" data-lang="uz">UZ</button>
+        </div>
+        <button type="button" class="icon-btn" id="theme-btn"></button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" class="container"></main>
+
+  <dialog id="modal"></dialog>
+  <div id="toasts" aria-live="polite"></div>
+
+  <noscript><p class="container">Для работы сайта включите JavaScript. / Sayt ishlashi uchun JavaScript-ni yoqing.</p></noscript>
+
+  <!-- Библиотеки для чтения файлов -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <!-- Приложение -->
+  <script defer src="js/i18n.js"></script>
+  <script defer src="js/grading.js"></script>
+  <script defer src="js/settings.js"></script>
+  <script defer src="js/db.js"></script>
+  <script defer src="js/files.js"></script>
+  <script defer src="js/ai.js"></script>
+  <script defer src="js/app.js"></script>
+</body>
+</html>
