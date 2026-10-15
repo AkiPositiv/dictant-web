@@ -899,6 +899,7 @@ dialog[open] { animation: pop .16s ease-out; }
 
   .page-head { margin-bottom: 16px; gap: 12px; }
   .page-head .actions { width: 100%; }
+  .page-head > .btn { width: 100%; }
   .actions .btn:not(.ghost) { flex: 1 1 auto; }
   .btn { min-height: 44px; }
   .btn.ghost { min-width: 44px; padding: 8px 10px; }
