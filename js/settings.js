@@ -1,6 +1,6 @@
 'use strict';
 
-// Настройки хранятся в localStorage этого браузера (ключ API, модель, язык, тема, нормы).
+// Настройки хранятся в localStorage этого браузера (ключ API, модель, язык, тема, шкала оценки).
 const Settings = (() => {
   const STORAGE_KEY = 'dictant-web:settings';
   const DEFAULTS = {
@@ -9,14 +9,14 @@ const Settings = (() => {
     models: [],
     uiLang: (navigator.language || '').toLowerCase().startsWith('uz') ? 'uz' : 'ru',
     theme: 'auto',
-    norms: { ...Grading.DEFAULT_NORMS },
-    ...Grading.DEFAULT_OPTIONS,
+    scale: { ...Grading.DEFAULT_SCALE },
+    lastMaxPoints: Grading.DEFAULT_MAX,
   };
 
   let data = { ...DEFAULTS };
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    data = { ...DEFAULTS, ...saved, norms: { ...DEFAULTS.norms, ...(saved.norms || {}) } };
+    data = { ...DEFAULTS, ...saved, scale: { ...DEFAULTS.scale, ...(saved.scale || {}) } };
   } catch (e) {
     console.warn('Settings: cannot read localStorage', e);
   }
@@ -33,10 +33,5 @@ const Settings = (() => {
     get: key => data[key],
     set(key, value) { data[key] = value; save(); },
     patch(obj) { Object.assign(data, obj); save(); },
-    gradingOptions: () => ({
-      grammarAsSpelling: data.grammarAsSpelling,
-      minorPairs: data.minorPairs,
-      ignoreRepeats: data.ignoreRepeats,
-    }),
   };
 })();

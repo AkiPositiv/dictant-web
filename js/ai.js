@@ -1,7 +1,8 @@
 'use strict';
 
 // Запросы к Google Gemini (бесплатный ключ: https://aistudio.google.com/apikey).
-// ИИ распознаёт текст работы и находит ошибки; оценку считает grading.js.
+// ИИ распознаёт текст работы, находит ошибки и предлагает баллы по критериям;
+// арифметику и оценку пересчитывает grading.js.
 const AI = (() => {
   const BASE = 'https://generativelanguage.googleapis.com/v1beta';
   const TIMEOUT_MS = 120000;
@@ -35,10 +36,36 @@ const AI = (() => {
           propertyOrdering: ['type', 'severity', 'repeat', 'wrong', 'correct', 'context', 'rule'],
         },
       },
+      criteria: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            key: { type: 'STRING', enum: TYPES },
+            points: { type: 'NUMBER' },
+            correct: { type: 'STRING' },
+            deductions: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  error: { type: 'INTEGER' },
+                  points: { type: 'NUMBER' },
+                  reason: { type: 'STRING' },
+                },
+                required: ['error', 'points', 'reason'],
+                propertyOrdering: ['error', 'points', 'reason'],
+              },
+            },
+          },
+          required: ['key', 'points', 'correct', 'deductions'],
+          propertyOrdering: ['key', 'correct', 'deductions', 'points'],
+        },
+      },
       summary: { type: 'STRING' },
     },
-    required: ['recognized_text', 'errors', 'summary'],
-    propertyOrdering: ['recognized_text', 'errors', 'summary'],
+    required: ['recognized_text', 'errors', 'criteria', 'summary'],
+    propertyOrdering: ['recognized_text', 'errors', 'criteria', 'summary'],
   };
 
   const LANG_NAMES = {
@@ -47,7 +74,13 @@ const AI = (() => {
   };
   const EXPLAIN_LANG = { ru: 'Russian', uz: 'Uzbek (Latin script)' };
 
-  function buildPrompt({ dictLang, uiLang, texts, inlineCount }) {
+  function buildPrompt({ dictLang, uiLang, texts, inlineCount, maxima }) {
+    const lang = EXPLAIN_LANG[uiLang] || EXPLAIN_LANG.ru;
+    const total = Object.values(maxima).reduce((a, b) => a + b, 0);
+    const criteriaLines = Object.entries(maxima).filter(([, max]) => max > 0).map(([key, max]) => {
+      const g = Grading.guide(max);
+      return `  - "${key}": max ${max} points (a gross error costs about ${g.gross}, a minor error about ${g.minor})`;
+    });
     const lines = [
       `You are an experienced school teacher of the ${LANG_NAMES[dictLang] || LANG_NAMES.ru} language. You are checking a student's dictation.`,
       '',
@@ -64,10 +97,20 @@ const AI = (() => {
       '  For a missing punctuation mark, give the words around the place where it is missing.',
       '- correct: the corrected fragment.',
       '- context: 3–6 words around the error, copied from recognized_text.',
-      `- rule: a short explanation of the rule in ${EXPLAIN_LANG[uiLang] || EXPLAIN_LANG.ru}.`,
+      `- rule: a short explanation of the rule in ${lang}.`,
       'Do not invent errors. Do not mark stylistic choices or illegible places as errors. If there are no errors, return an empty list.',
       '',
-      `STEP 3 — "summary": 1–3 sentences with an overall comment for the teacher in ${EXPLAIN_LANG[uiLang] || EXPLAIN_LANG.ru}.`,
+      `STEP 3 — scoring. The work is worth ${total} points, split into criteria:`,
+      ...criteriaLines,
+      'Return "criteria" — one object per criterion listed above:',
+      '- key: the criterion.',
+      `- correct: 1–2 sentences in ${lang} about what the student did CORRECTLY in this area (which rules and word groups are mastered). Be specific.`,
+      '- deductions: one entry for every error of this type that costs points: error = the 1-based number of the error in the "errors" list,',
+      `  points = how many points are deducted, reason = a short reason in ${lang}. Repeated errors (repeat=true) cost nothing and are not listed.`,
+      '  Use the costs given above as a guide; the sum of deductions must not exceed the criterion maximum.',
+      '- points: the criterion maximum minus the sum of deductions (not below 0).',
+      '',
+      `STEP 4 — "summary": 1–3 sentences with an overall comment for the teacher in ${lang}.`,
       '',
       'Answer with JSON only.',
     ];
@@ -135,14 +178,23 @@ const AI = (() => {
       context: str(e.context),
       rule: str(e.rule),
     }));
-    return { recognized_text: str(res.recognized_text), errors, summary: str(res.summary) };
+    const criteria = (Array.isArray(res.criteria) ? res.criteria : [])
+      .filter(c => TYPES.includes(c.key))
+      .map(c => ({
+        key: c.key,
+        points: Number(c.points),
+        correct: str(c.correct),
+        deductions: (Array.isArray(c.deductions) ? c.deductions : [])
+          .map(d => ({ error: Number(d.error), points: Number(d.points), reason: str(d.reason) })),
+      }));
+    return { recognized_text: str(res.recognized_text), errors, criteria, summary: str(res.summary) };
   }
 
-  async function check({ key, model, dictLang, uiLang, texts, inline }) {
+  async function check({ key, model, dictLang, uiLang, texts, inline, maxima }) {
     const inlineBytes = inline.reduce((sum, p) => sum + p.data.length * 0.75, 0);
     if (inlineBytes > MAX_INLINE_BYTES) throw new Error(t('errTooLarge'));
 
-    const parts = [{ text: buildPrompt({ dictLang, uiLang, texts, inlineCount: inline.length }) }];
+    const parts = [{ text: buildPrompt({ dictLang, uiLang, texts, inlineCount: inline.length, maxima }) }];
     inline.forEach(p => parts.push({ inlineData: { mimeType: p.mimeType, data: p.data } }));
 
     const data = await request(`models/${encodeURIComponent(model)}:generateContent`, key, {

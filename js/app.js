@@ -52,6 +52,8 @@ function fmtSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const fmtNum = n => Number(n).toLocaleString(I18n.lang === 'uz' ? 'uz-UZ' : 'ru-RU', { maximumFractionDigits: 1 });
+
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 
 const finalGrade = work => work.manualGrade ?? work.result?.grade ?? null;
@@ -244,7 +246,9 @@ async function viewGroup(id) {
     if (!list.length) {
       return `<td><button class="cell-add" data-student="${student.id}" data-title="${esc(col.title)}" title="${esc(t('addWork'))}">+</button></td>`;
     }
-    return `<td><a href="#/work/${list[0].id}" class="cell-link">${gradeBadge(list[0])}</a></td>`;
+    const sc = list[0].result?.score;
+    const pts = sc && !checking.has(list[0].id) ? `<span class="cell-pts">${fmtNum(sc.total)}/${sc.maxPoints}</span>` : '';
+    return `<td><a href="#/work/${list[0].id}" class="cell-link">${gradeBadge(list[0])}${pts}</a></td>`;
   };
 
   app.innerHTML = `
@@ -325,11 +329,12 @@ async function viewStudent(id) {
   works.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.createdAt - a.createdAt);
 
   const workRow = w => {
-    const c = w.result?.counts;
+    const sc = w.result?.score;
     const info = checking.has(w.id) ? t('checking')
       : w.status === 'error' ? t('statusError')
-      : c ? `${t('spellingShort')} ${c.effSpelling} · ${t('punctShort')} ${c.effPunct}`
-      : t('statusNew');
+      : sc ? t('pointsOf', { p: fmtNum(sc.total), max: sc.maxPoints, percent: sc.percent })
+      : w.result ? t('statusDone')
+      : `${t('statusNew')} · ${t('pointsMax', { max: w.maxPoints || Grading.DEFAULT_MAX })}`;
     return `
       <a class="work-row" href="#/work/${w.id}">
         ${gradeBadge(w)}
@@ -377,9 +382,23 @@ async function viewStudent(id) {
 
 // ---------- добавление работы ----------
 
+const maxPointsField = value => `
+  <label class="field points-field">${esc(t('maxPoints'))}
+    <div class="points-input">
+      <input type="number" name="maxPoints" required min="1" max="100" step="1" inputmode="numeric" value="${esc(value)}">
+      <span>${esc(t('pointsUnit'))}</span>
+    </div>
+    <span class="muted small hint">${esc(t('maxPointsHint'))}</span>
+  </label>`;
+
 async function addWork({ group, students, studentId, title }) {
   const groupWorks = await DB.byIndex('works', 'groupId', group.id);
   const titles = journalColumns(groupWorks).map(c => c.title);
+  // Максимум баллов уже существующих работ с тем же названием
+  const maxByTitle = new Map();
+  [...groupWorks].sort((a, b) => a.createdAt - b.createdAt)
+    .forEach(w => { if (w.maxPoints) maxByTitle.set(w.title, w.maxPoints); });
+  const initialMax = maxByTitle.get(title) || Settings.get('lastMaxPoints') || Grading.DEFAULT_MAX;
   const picked = [];
 
   const renderFiles = form => {
@@ -414,10 +433,13 @@ async function addWork({ group, students, studentId, title }) {
           <input type="date" name="date" required value="${today()}">
         </label>
       </div>
-      <label class="field">${esc(t('workTitle'))}
-        <input name="title" required maxlength="80" list="work-titles" value="${esc(title || '')}" placeholder="${esc(t('workTitlePh'))}">
-        <datalist id="work-titles">${titles.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
-      </label>
+      <div class="grid-2 title-row">
+        <label class="field">${esc(t('workTitle'))}
+          <input name="title" required maxlength="80" list="work-titles" value="${esc(title || '')}" placeholder="${esc(t('workTitlePh'))}">
+          <datalist id="work-titles">${titles.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+        </label>
+        ${maxPointsField(initialMax)}
+      </div>
       <div class="drop" tabindex="0">
         ${icon('upload')}
         <div><b>${esc(t('dropTitle'))}</b><div class="muted small">${esc(t('dropFormats'))}</div></div>
@@ -438,6 +460,10 @@ async function addWork({ group, students, studentId, title }) {
       drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
       drop.ondragleave = () => drop.classList.remove('over');
       drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); addFiles(f, e.dataTransfer.files); };
+      f.title.addEventListener('input', () => {
+        const known = maxByTitle.get(f.title.value.trim());
+        if (known) f.maxPoints.value = known;
+      });
       (title ? f.text : f.title).focus();
     },
   });
@@ -449,6 +475,7 @@ async function addWork({ group, students, studentId, title }) {
     studentId: form.studentId.value,
     title: form.title.value.trim(),
     date: form.date.value,
+    maxPoints: Number(form.maxPoints.value),
     inputText: form.text.value.trim(),
     files: picked.map(f => ({ name: f.name, type: f.type, size: f.size, blob: f })),
     status: 'new',
@@ -459,6 +486,7 @@ async function addWork({ group, students, studentId, title }) {
     createdAt: Date.now(),
   };
   await DB.put('works', work);
+  Settings.set('lastMaxPoints', work.maxPoints);
   toast(t('saved'), 'success');
   const checkNow = form.checkNow.checked;
   location.hash = `#/work/${work.id}`;
@@ -498,7 +526,9 @@ async function checkWork(id) {
     // или она перегружена / не ответила вовремя — пробуем следующую.
     const selected = Settings.get('model');
     const models = [selected, ...AI.BACKUP_MODELS.filter(m => m !== selected)];
-    const request = { key, dictLang: group?.lang || 'ru', uiLang: I18n.lang, texts, inline };
+    const maxPoints = work.maxPoints || Grading.DEFAULT_MAX;
+    const maxima = Grading.split(maxPoints);
+    const request = { key, dictLang: group?.lang || 'ru', uiLang: I18n.lang, texts, inline, maxima };
     let ai;
     let model;
     for (let i = 0; i < models.length && !ai; i++) {
@@ -511,10 +541,8 @@ async function checkWork(id) {
         toast(t('modelSwitched', { model: models[i + 1] }), 'info');
       }
     }
-    const norms = { ...Settings.get('norms') };
-    const opts = Settings.gradingOptions();
-    const counts = Grading.count(ai.errors, opts);
-    const g = Grading.grade(counts, norms);
+    const score = Grading.score(ai.criteria, ai.errors, maxPoints);
+    const scale = { ...Settings.get('scale') };
 
     work = await DB.get('works', id); // могли изменить, пока шла проверка
     if (!work) return;
@@ -522,11 +550,9 @@ async function checkWork(id) {
       recognizedText: ai.recognized_text,
       errors: ai.errors,
       summary: ai.summary,
-      counts,
-      grade: g.grade,
-      combo: g.combo,
-      norms,
-      opts,
+      score,
+      grade: Grading.gradeFor(score.percent, scale),
+      scale,
       model,
       checkedAt: Date.now(),
     };
@@ -584,47 +610,60 @@ function highlight(text, errors) {
   return out + esc(text.slice(cur));
 }
 
+// Критерии: что правильно, за что и сколько снято
 function criteriaHtml(r) {
-  const c = r.counts;
-  const o = r.opts;
-  const combo = ([s, p]) => t('comboFmt', { s, p });
-  const rows = [5, 4, 3, 2].map(g => {
-    const active = r.grade === g;
-    const combos = Grading.combosFor(r.norms, g).map(x => {
-      const hit = active && r.combo && r.combo[0] === x[0] && r.combo[1] === x[1];
-      return `<span class="combo ${hit ? 'hit' : ''}">${esc(combo(x))}</span>`;
+  const sc = r.score;
+  const cards = sc.criteria.map(c => {
+    const ok = c.lost === 0;
+    const pct = c.max ? Math.round((c.points / c.max) * 100) : 0;
+    const deductions = c.deductions.map(d => {
+      const e = d.error !== null ? r.errors[d.error] : null;
+      return `
+        <li>
+          <span class="minus">−${fmtNum(d.points)}</span>
+          <span>
+            ${e ? `<span class="err-fix"><s>${esc(e.wrong)}</s> <span class="arrow">→</span> <b>${esc(e.correct)}</b></span>${d.reason || e.rule ? ' — ' : ''}` : ''}
+            ${esc(d.reason || e?.rule || (e ? '' : t('otherDeduction')))}
+          </span>
+        </li>`;
     }).join('');
-    return `<tr class="${active ? 'active' : ''}"><td><span class="grade g${g}">${g}</span></td><td><div class="combos">${combos}</div></td></tr>`;
-  }).join('') + `<tr class="${r.grade === 1 ? 'active' : ''}"><td><span class="grade g1">1</span></td><td>${esc(t('normsWorse'))}</td></tr>`;
-
-  const verdict = r.grade > 1
-    ? t('verdictFit', { s: c.effSpelling, p: c.effPunct, g: r.grade, combo: combo(r.combo) })
-    : t('verdictWorse', { s: c.effSpelling, p: c.effPunct });
-
-  const typeRow = (label, x) => `<li><b>${esc(label)}:</b> ${esc(t('grossN', { n: x.gross }))}, ${esc(t('minorN', { n: x.minor }))}</li>`;
-
+    return `
+      <div class="crit ${ok ? 'ok' : 'bad'}">
+        <div class="crit-head">
+          <span class="crit-icon">${icon(ok ? 'check' : 'x')}</span>
+          <b class="crit-name">${esc(t('type_' + c.key))}</b>
+          <span class="crit-pts">${fmtNum(c.points)} / ${c.max}</span>
+          ${ok ? '' : `<span class="crit-lost">−${fmtNum(c.lost)}</span>`}
+        </div>
+        <div class="bar"><span style="width:${pct}%"></span></div>
+        ${c.correct ? `<p class="crit-good"><b>${esc(t('doneRight'))}:</b> ${esc(c.correct)}</p>` : ''}
+        ${deductions
+          ? `<div class="crit-sub">${esc(t('deductedFor'))}:</div><ul class="deductions">${deductions}</ul>`
+          : `<p class="crit-none">${esc(t('noDeductions'))}</p>`}
+      </div>`;
+  }).join('');
+  const m = sc.maxima;
   return `
-    <div class="count-chips">
-      <div class="count-chip spelling"><b>${c.effSpelling}</b><span>${esc(t('effSpelling'))}</span></div>
-      <div class="count-chip punctuation"><b>${c.effPunct}</b><span>${esc(t('effPunct'))}</span></div>
-    </div>
-    <p class="verdict">${esc(verdict)}</p>
-    <table class="norms">
-      <thead><tr><th>${esc(t('grade'))}</th><th>${esc(t('normsAllowed'))}</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div class="crits">${cards}</div>
     <details class="rules">
-      <summary>${esc(t('howCounted'))}</summary>
+      <summary>${esc(t('howScored'))}</summary>
       <ul>
-        ${typeRow(t('typeSpelling'), c.spelling)}
-        ${typeRow(t('typePunctuation'), c.punctuation)}
-        ${typeRow(t('typeGrammar'), c.grammar)}
-        <li>${esc(o.grammarAsSpelling ? t('ruleGrammarIn') : t('ruleGrammarOut'))}</li>
-        <li>${esc(o.minorPairs ? t('ruleMinorPairs') : t('ruleMinorFull'))}</li>
-        ${o.ignoreRepeats ? `<li>${esc(t('ruleRepeats', { n: c.repeats }))}</li>` : ''}
-        <li>${esc(t('ruleAi', { model: r.model }))}</li>
+        <li>${esc(t('ruleWeights', { s: m.spelling, p: m.punctuation, g: m.grammar }))}</li>
+        <li>${esc(t('ruleGuide'))}</li>
+        <li>${esc(t('ruleScoreAi', { model: r.model }))}</li>
       </ul>
     </details>`;
+}
+
+// Шкала перевода процента в оценку
+function scaleHtml(r) {
+  const sc = r.scale;
+  const rows = [5, 4, 3, 2, 1].map(g => {
+    const from = g === 1 ? 0 : sc[g];
+    const to = g === 5 ? 100 : sc[g + 1] - 1;
+    return `<tr class="${r.grade === g ? 'active' : ''}"><td><span class="grade g${g}">${g}</span></td><td>${esc(t('scaleRow', { from, to }))}</td></tr>`;
+  }).join('');
+  return `<table class="norms scale"><tbody>${rows}</tbody></table>`;
 }
 
 function errorsHtml(errors) {
@@ -658,7 +697,7 @@ async function viewWork(id) {
     <div class="page-head">
       <div>
         <h1>${esc(work.title)}</h1>
-        <p class="muted">${esc(student?.name || '')} · ${fmtDate(work.date)}</p>
+        <p class="muted">${esc(student?.name || '')} · ${fmtDate(work.date)} · ${esc(t('pointsMax', { max: work.maxPoints || Grading.DEFAULT_MAX }))}</p>
       </div>
       <div class="actions">
         <button class="btn primary" id="check" ${busy ? 'disabled' : ''}>${icon(r ? 'refresh' : 'check')}${esc(r ? t('recheck') : t('check'))}</button>
@@ -677,9 +716,14 @@ async function viewWork(id) {
           <div class="grade-big g${fg}">${fg}</div>
           <div class="grade-caption">${esc(work.manualGrade ? t('manualGradeSet') : t('autoGradeLabel'))}</div>
           ${work.manualGrade ? `<p class="muted small">${esc(t('autoGradeWas', { g: r.grade }))}</p>` : ''}
+          ${r.score ? `
+            <div class="points-total"><b>${fmtNum(r.score.total)}</b> / ${r.score.maxPoints} <span>${esc(t('pointsUnit'))}</span></div>
+            <div class="bar big"><span style="width:${r.score.percent}%"></span></div>
+            <p class="muted small">${esc(t('scaleVerdict', { percent: r.score.percent, g: r.grade }))}</p>
+            ${scaleHtml(r)}` : ''}
           <label class="field compact">${esc(t('overrideGrade'))}
             <select id="manual">
-              <option value="">${esc(t('byNorms', { g: r.grade }))}</option>
+              <option value="">${esc(t('byScale', { g: r.grade }))}</option>
               ${[5, 4, 3, 2, 1].map(g => `<option value="${g}" ${work.manualGrade === g ? 'selected' : ''}>${g}</option>`).join('')}
             </select>
           </label>
@@ -687,7 +731,7 @@ async function viewWork(id) {
         </section>
         <section class="panel">
           <h2>${esc(t('criteriaTitle'))}</h2>
-          ${criteriaHtml(r)}
+          ${r.score ? criteriaHtml(r) : `<div class="notice">${esc(t('legacyResult'))}</div>`}
         </section>
       </div>
       <section class="panel">
@@ -748,10 +792,12 @@ async function viewWork(id) {
       ok: t('save'),
       body: `
         <label class="field">${esc(t('workTitle'))}<input name="title" required maxlength="80" value="${esc(work.title)}"></label>
-        <label class="field">${esc(t('date'))}<input type="date" name="date" required value="${esc(work.date)}"></label>`,
+        <label class="field">${esc(t('date'))}<input type="date" name="date" required value="${esc(work.date)}"></label>
+        ${maxPointsField(work.maxPoints || Grading.DEFAULT_MAX)}
+        ${r?.score ? `<p class="muted small">${esc(t('maxPointsRecheck'))}</p>` : ''}`,
     });
     if (!form) return;
-    await DB.put('works', { ...(await DB.get('works', id)), title: form.title.value.trim(), date: form.date.value });
+    await DB.put('works', { ...(await DB.get('works', id)), title: form.title.value.trim(), date: form.date.value, maxPoints: Number(form.maxPoints.value) });
     render();
   };
   const manual = $('#manual');
@@ -793,7 +839,7 @@ async function viewSettings() {
   const current = Settings.get('model');
   const modelOptions = [...new Set([current, ...models.map(m => m.id)])]
     .map(m => `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`).join('');
-  const norms = Settings.get('norms');
+  const scale = Settings.get('scale');
 
   app.innerHTML = `
     <div class="page-head"><div><h1>${esc(t('settings'))}</h1></div></div>
@@ -822,23 +868,23 @@ async function viewSettings() {
     </section>
 
     <section class="panel">
-      <h2>${esc(t('normsTitle'))}</h2>
-      <p class="muted">${esc(t('normsHelp'))}</p>
+      <h2>${esc(t('scaleTitle'))}</h2>
+      <p class="muted">${esc(t('scaleHelp'))}</p>
       <div class="norm-rows">
         ${[5, 4, 3, 2].map(g => `
           <label class="norm-row">
             <span class="grade g${g}">${g}</span>
-            <input data-grade="${g}" value="${esc(norms[g])}" spellcheck="false">
+            <span class="muted">${esc(t('scaleFrom'))}</span>
+            <input type="number" min="0" max="100" step="1" data-grade="${g}" value="${esc(scale[g])}">
+            <span class="muted">%</span>
           </label>`).join('')}
-        <div class="norm-row"><span class="grade g1">1</span><span class="muted">${esc(t('normsWorse'))}</span></div>
+        <div class="norm-row"><span class="grade g1">1</span><span class="muted">${esc(t('scaleBelow'))}</span></div>
       </div>
-      <label class="check"><input type="checkbox" id="opt-grammar" ${Settings.get('grammarAsSpelling') ? 'checked' : ''}> ${esc(t('optGrammar'))}</label>
-      <label class="check"><input type="checkbox" id="opt-minor" ${Settings.get('minorPairs') ? 'checked' : ''}> ${esc(t('optMinor'))}</label>
-      <label class="check"><input type="checkbox" id="opt-repeat" ${Settings.get('ignoreRepeats') ? 'checked' : ''}> ${esc(t('optRepeat'))}</label>
-      <p class="muted small">${esc(t('normsNote'))}</p>
+      <p class="muted small">${esc(t('criteriaSplitInfo'))}</p>
+      <p class="muted small">${esc(t('scaleNote'))}</p>
       <div class="actions left">
-        <button class="btn primary" id="save-norms">${esc(t('save'))}</button>
-        <button class="btn ghost" id="reset-norms">${esc(t('resetDefaults'))}</button>
+        <button class="btn primary" id="save-scale">${esc(t('save'))}</button>
+        <button class="btn ghost" id="reset-scale">${esc(t('resetDefaults'))}</button>
       </div>
     </section>
 
@@ -880,27 +926,16 @@ async function viewSettings() {
   };
   $('#model').onchange = e => { Settings.set('model', e.target.value); toast(t('saved'), 'success'); };
 
-  $('#save-norms').onclick = () => {
+  $('#save-scale').onclick = () => {
     const next = {};
-    for (const input of $$('[data-grade]')) {
-      if (!Grading.parse(input.value)) {
-        input.focus();
-        toast(t('errNorms', { g: input.dataset.grade }), 'error');
-        return;
-      }
-      next[input.dataset.grade] = input.value.trim();
-    }
-    Settings.patch({
-      norms: next,
-      grammarAsSpelling: $('#opt-grammar').checked,
-      minorPairs: $('#opt-minor').checked,
-      ignoreRepeats: $('#opt-repeat').checked,
-    });
-    toast(t('normsSaved'), 'success');
+    $$('[data-grade]').forEach(input => { next[input.dataset.grade] = Number(input.value); });
+    if (!Grading.validScale(next)) { toast(t('errScale'), 'error'); return; }
+    Settings.set('scale', next);
+    toast(t('scaleSaved'), 'success');
   };
-  $('#reset-norms').onclick = () => {
-    Settings.patch({ norms: { ...Grading.DEFAULT_NORMS }, ...Grading.DEFAULT_OPTIONS });
-    toast(t('normsSaved'), 'success');
+  $('#reset-scale').onclick = () => {
+    Settings.set('scale', { ...Grading.DEFAULT_SCALE });
+    toast(t('scaleSaved'), 'success');
     render();
   };
 
