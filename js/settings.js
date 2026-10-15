@@ -11,6 +11,7 @@ const Settings = (() => {
     theme: 'auto',
     scale: { ...Grading.DEFAULT_SCALE },
     lastMaxPoints: Grading.DEFAULT_MAX,
+    capByNorms: true, // оценка не выше, чем допускают школьные нормы по числу ошибок
   };
 
   let data = { ...DEFAULTS };

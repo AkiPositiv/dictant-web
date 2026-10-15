@@ -693,6 +693,23 @@ textarea.mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 .err-fix s { color: var(--danger); text-decoration-thickness: 2px; }
 .err-fix b { color: var(--ok); }
 .err-fix .arrow { color: var(--muted); margin: 0 4px; }
+.err-tag.teacher { background: var(--accent-soft); color: var(--accent); }
+.err-actions { margin-left: auto; }
+.err-actions .link { font-size: .85rem; padding: 4px 2px; }
+.danger-link { color: var(--danger); }
+.err-item.is-removed .err-fix, .err-item.is-removed .muted { opacity: .55; }
+.err-item.is-removed .err-fix b { text-decoration: line-through; }
+.edit-hint { margin: -6px 0 14px; }
+.cap-note {
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: .85rem;
+  text-align: left;
+}
+.cap-note.warn { background: var(--warn-soft); border: 1px solid var(--warn-border); font-weight: 600; }
 .ok-text { display: flex; align-items: center; gap: 8px; color: var(--ok); font-weight: 700; }
 
 /* текст работы */

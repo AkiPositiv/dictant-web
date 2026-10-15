@@ -495,6 +495,20 @@ async function addWork({ group, students, studentId, title }) {
 
 // ---------- проверка ----------
 
+// Пересчёт баллов и оценки по ошибкам (после проверки и после правок учителя)
+function reevaluate(r) {
+  if (!r.aiCriteria) r.aiCriteria = Grading.aiCriteriaFrom(r.score);
+  Object.assign(r, Grading.evaluate({
+    aiCriteria: r.aiCriteria,
+    errors: r.errors,
+    maxPoints: r.maxPoints || r.score.maxPoints,
+    scale: r.scale,
+    capByNorms: r.capByNorms ?? false,
+  }));
+}
+
+const hasTeacherEdits = r => (r?.errors || []).some(e => e.removed || e.byTeacher);
+
 async function checkWork(id) {
   if (checking.has(id)) return;
   const key = Settings.get('apiKey');
@@ -541,21 +555,21 @@ async function checkWork(id) {
         toast(t('modelSwitched', { model: models[i + 1] }), 'info');
       }
     }
-    const score = Grading.score(ai.criteria, ai.errors, maxPoints);
-    const scale = { ...Settings.get('scale') };
 
     work = await DB.get('works', id); // могли изменить, пока шла проверка
     if (!work) return;
     work.result = {
       recognizedText: ai.recognized_text,
       errors: ai.errors,
+      aiCriteria: ai.criteria,
       summary: ai.summary,
-      score,
-      grade: Grading.gradeFor(score.percent, scale),
-      scale,
+      maxPoints,
+      scale: { ...Settings.get('scale') },
+      capByNorms: Settings.get('capByNorms'),
       model,
       checkedAt: Date.now(),
     };
+    reevaluate(work.result);
     work.status = 'done';
     work.error = null;
     await DB.put('works', work);
@@ -582,7 +596,7 @@ function highlight(text, errors) {
   const marks = [];
   const free = (s, e) => !marks.some(m => s < m.end && e > m.start);
   errors.forEach((err, i) => {
-    if (!err.wrong) return;
+    if (!err.wrong || err.removed) return;
     const candidates = [];
     if (err.context && err.context.includes(err.wrong)) {
       let c = text.indexOf(err.context);
@@ -622,6 +636,7 @@ function criteriaHtml(r) {
         <li>
           <span class="minus">−${fmtNum(d.points)}</span>
           <span>
+            ${d.byTeacher ? `<span class="err-tag teacher">${esc(t('teacherTag'))}</span> ` : ''}
             ${e ? `<span class="err-fix"><s>${esc(e.wrong)}</s> <span class="arrow">→</span> <b>${esc(e.correct)}</b></span>${d.reason || e.rule ? ' — ' : ''}` : ''}
             ${esc(d.reason || e?.rule || (e ? '' : t('otherDeduction')))}
           </span>
@@ -651,6 +666,8 @@ function criteriaHtml(r) {
         <li>${esc(t('ruleWeights', { s: m.spelling, p: m.punctuation, g: m.grammar }))}</li>
         <li>${esc(t('ruleGuide'))}</li>
         <li>${esc(t('ruleScoreAi', { model: r.model }))}</li>
+        ${r.capByNorms ? `<li>${esc(t('ruleNorms'))}</li>` : ''}
+        ${hasTeacherEdits(r) ? `<li>${esc(t('ruleTeacher'))}</li>` : ''}
       </ul>
     </details>`;
 }
@@ -661,23 +678,92 @@ function scaleHtml(r) {
   const rows = [5, 4, 3, 2, 1].map(g => {
     const from = g === 1 ? 0 : sc[g];
     const to = g === 5 ? 100 : sc[g + 1] - 1;
-    return `<tr class="${r.grade === g ? 'active' : ''}"><td><span class="grade g${g}">${g}</span></td><td>${esc(t('scaleRow', { from, to }))}</td></tr>`;
+    return `<tr class="${(r.scaleGrade ?? r.grade) === g ? 'active' : ''}"><td><span class="grade g${g}">${g}</span></td><td>${esc(t('scaleRow', { from, to }))}</td></tr>`;
   }).join('');
   return `<table class="norms scale"><tbody>${rows}</tbody></table>`;
 }
 
-function errorsHtml(errors) {
+// Ограничение оценки школьными нормами
+function capHtml(r) {
+  if (!r.capByNorms || !r.counts) return '';
+  const vars = { s: r.counts.effSpelling, p: r.counts.effPunct, g: r.cap.grade, sg: r.scaleGrade };
+  return r.cap.grade < r.scaleGrade
+    ? `<div class="cap-note warn">${esc(t('capApplied', vars))}</div>`
+    : `<div class="cap-note">${esc(t('capOk', vars))}</div>`;
+}
+
+// Список ошибок; editable — с кнопками правки учителя
+function errorsHtml(errors, editable) {
   if (!errors.length) return `<p class="ok-text">${icon('check')} ${esc(t('noErrors'))}</p>`;
-  return `<ol class="errors">${errors.map(e => `
-    <li class="err-item ${e.repeat ? 'is-repeat' : ''}">
+  const action = (e, i) => {
+    if (e.byTeacher) return `<button class="link danger-link" data-delete-err="${i}">${esc(t('delete'))}</button>`;
+    if (e.removed) return `<button class="link" data-restore-err="${i}">${esc(t('restoreError'))}</button>`;
+    return `<button class="link" data-remove-err="${i}">${esc(t('notAnError'))}</button>`;
+  };
+  return `<ol class="errors">${errors.map((e, i) => `
+    <li class="err-item ${e.repeat ? 'is-repeat' : ''} ${e.removed ? 'is-removed' : ''}">
       <div class="err-line">
         <span class="err-tag ${e.type}">${esc(t('type_' + e.type))}</span>
         ${e.severity === 'minor' ? `<span class="err-tag minor">${esc(t('minor'))}</span>` : ''}
         ${e.repeat ? `<span class="err-tag repeat">${esc(t('repeat'))}</span>` : ''}
+        ${e.byTeacher ? `<span class="err-tag teacher">${esc(t('addedByTeacher'))} · −${fmtNum(e.points)}</span>` : ''}
+        ${e.removed ? `<span class="err-tag teacher">${esc(t('removedByTeacher'))}</span>` : ''}
+        ${editable ? `<span class="err-actions">${action(e, i)}</span>` : ''}
       </div>
       <div class="err-fix"><s>${esc(e.wrong)}</s> <span class="arrow">→</span> <b>${esc(e.correct)}</b></div>
       ${e.rule ? `<div class="muted small">${esc(e.rule)}</div>` : ''}
     </li>`).join('')}</ol>`;
+}
+
+// Окно «Добавить ошибку»: учитель добавляет то, что пропустил ИИ
+async function addErrorModal(r) {
+  const maxima = r.score.maxima;
+  const types = Grading.CRITERIA.map(c => c.key).filter(k => maxima[k] > 0);
+  const suggest = (type, severity) => Grading.guide(maxima[type])[severity];
+  const form = await modal({
+    title: t('addError'),
+    ok: t('add'),
+    body: `
+      <div class="grid-2">
+        <label class="field">${esc(t('errWrong'))}<input name="wrong" required maxlength="120" placeholder="${esc(t('errWrongPh'))}"></label>
+        <label class="field">${esc(t('errCorrect'))}<input name="correct" required maxlength="120"></label>
+        <label class="field">${esc(t('errType'))}
+          <select name="type">${types.map(k => `<option value="${k}">${esc(t('type_' + k))}</option>`).join('')}</select>
+        </label>
+        <label class="field">${esc(t('errSeverity'))}
+          <select name="severity"><option value="gross">${esc(t('gross'))}</option><option value="minor">${esc(t('minor'))}</option></select>
+        </label>
+      </div>
+      <label class="field">${esc(t('errPoints'))}
+        <input type="number" name="points" required min="0" step="0.5">
+        <span class="muted small hint" data-points-hint></span>
+      </label>
+      <label class="field">${esc(t('errRule'))}<textarea name="rule" rows="2" maxlength="300"></textarea></label>`,
+    validate: f => (Number(f.points.value) > maxima[f.type.value] ? t('errPointsTooMany', { max: maxima[f.type.value] }) : null),
+    onOpen: f => {
+      const update = () => {
+        f.points.value = suggest(f.type.value, f.severity.value);
+        f.points.max = maxima[f.type.value];
+        $('[data-points-hint]', f).textContent = t('errPointsHint', { max: maxima[f.type.value] });
+      };
+      f.type.onchange = update;
+      f.severity.onchange = update;
+      update();
+      f.wrong.focus();
+    },
+  });
+  if (!form) return null;
+  return {
+    type: form.type.value,
+    severity: form.severity.value,
+    repeat: false,
+    wrong: form.wrong.value.trim(),
+    correct: form.correct.value.trim(),
+    context: '',
+    rule: form.rule.value.trim(),
+    points: Number(form.points.value),
+    byTeacher: true,
+  };
 }
 
 async function viewWork(id) {
@@ -711,6 +797,7 @@ async function viewWork(id) {
     ${!busy && !r && work.status !== 'error' ? `<div class="notice">${esc(t('notChecked'))}</div>` : ''}
 
     ${r ? `
+      ${/lite/.test(r.model || '') ? `<div class="notice warn">${esc(t('liteWarning', { model: r.model }))}</div>` : ''}
       <div class="result-grid">
         <section class="panel grade-panel">
           <div class="grade-big g${fg}">${fg}</div>
@@ -719,8 +806,9 @@ async function viewWork(id) {
           ${r.score ? `
             <div class="points-total"><b>${fmtNum(r.score.total)}</b> / ${r.score.maxPoints} <span>${esc(t('pointsUnit'))}</span></div>
             <div class="bar big"><span style="width:${r.score.percent}%"></span></div>
-            <p class="muted small">${esc(t('scaleVerdict', { percent: r.score.percent, g: r.grade }))}</p>
-            ${scaleHtml(r)}` : ''}
+            <p class="muted small">${esc(t('scaleVerdict', { percent: r.score.percent, g: r.scaleGrade ?? r.grade }))}</p>
+            ${scaleHtml(r)}
+            ${capHtml(r)}` : ''}
           <label class="field compact">${esc(t('overrideGrade'))}
             <select id="manual">
               <option value="">${esc(t('byScale', { g: r.grade }))}</option>
@@ -735,8 +823,12 @@ async function viewWork(id) {
         </section>
       </div>
       <section class="panel">
-        <h2>${esc(t('errorsTitle'))} <span class="count">${r.errors.length}</span></h2>
-        ${errorsHtml(r.errors)}
+        <div class="panel-head">
+          <h2>${esc(t('errorsTitle'))} <span class="count">${r.errors.filter(e => !e.removed).length}</span></h2>
+          ${r.score ? `<button class="btn small" id="add-error">${icon('plus')}${esc(t('addError'))}</button>` : ''}
+        </div>
+        ${r.score ? `<p class="muted small edit-hint">${esc(t('editErrorsHint'))}</p>` : ''}
+        ${errorsHtml(r.errors, Boolean(r.score))}
       </section>
       <section class="panel">
         <div class="panel-head">
@@ -779,7 +871,29 @@ async function viewWork(id) {
   }));
   window.addEventListener('hashchange', () => urls.forEach(URL.revokeObjectURL), { once: true });
 
-  $('#check').onclick = () => checkWork(id);
+  $('#check').onclick = async () => {
+    if (hasTeacherEdits(r) && !(await confirmBox(t('recheck'), t('recheckLosesEdits'), t('recheck')))) return;
+    checkWork(id);
+  };
+
+  // правка ошибок учителем: сразу пересчитываем баллы и оценку
+  const editResult = async mutate => {
+    const w = await DB.get('works', id);
+    mutate(w.result);
+    reevaluate(w.result);
+    await DB.put('works', w);
+    toast(t('recalculated', { total: fmtNum(w.result.score.total), max: w.result.score.maxPoints, g: w.result.grade }), 'success');
+    render();
+  };
+  $$('[data-remove-err]').forEach(b => (b.onclick = () => editResult(res => { res.errors[b.dataset.removeErr].removed = true; })));
+  $$('[data-restore-err]').forEach(b => (b.onclick = () => editResult(res => { delete res.errors[b.dataset.restoreErr].removed; })));
+  $$('[data-delete-err]').forEach(b => (b.onclick = () => editResult(res => { res.errors.splice(Number(b.dataset.deleteErr), 1); })));
+  const addErr = $('#add-error');
+  if (addErr) addErr.onclick = async () => {
+    const err = await addErrorModal(r);
+    if (err) editResult(res => { res.errors.push(err); });
+  };
+
   $('#del-work').onclick = async () => {
     if (!(await confirmBox(t('deleteWork'), t('deleteWorkConfirm', { name: work.title })))) return;
     await DB.deleteWork(id);
@@ -880,6 +994,8 @@ async function viewSettings() {
           </label>`).join('')}
         <div class="norm-row"><span class="grade g1">1</span><span class="muted">${esc(t('scaleBelow'))}</span></div>
       </div>
+      <label class="check"><input type="checkbox" id="opt-cap" ${Settings.get('capByNorms') ? 'checked' : ''}> ${esc(t('optCap'))}</label>
+      <p class="muted small">${esc(t('normsText'))}</p>
       <p class="muted small">${esc(t('criteriaSplitInfo'))}</p>
       <p class="muted small">${esc(t('scaleNote'))}</p>
       <div class="actions left">
@@ -930,11 +1046,11 @@ async function viewSettings() {
     const next = {};
     $$('[data-grade]').forEach(input => { next[input.dataset.grade] = Number(input.value); });
     if (!Grading.validScale(next)) { toast(t('errScale'), 'error'); return; }
-    Settings.set('scale', next);
+    Settings.patch({ scale: next, capByNorms: $('#opt-cap').checked });
     toast(t('scaleSaved'), 'success');
   };
   $('#reset-scale').onclick = () => {
-    Settings.set('scale', { ...Grading.DEFAULT_SCALE });
+    Settings.patch({ scale: { ...Grading.DEFAULT_SCALE }, capByNorms: true });
     toast(t('scaleSaved'), 'success');
     render();
   };
