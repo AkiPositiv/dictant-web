@@ -5,6 +5,7 @@
 const I18N = {
   ru: {
     appName: 'Проверка диктантов',
+    appShort: 'Диктанты',
     appTitle: 'Проверка диктантов — электронный журнал',
     groups: 'Группы',
     settings: 'Настройки',
@@ -183,6 +184,7 @@ const I18N = {
 
   uz: {
     appName: 'Diktant tekshiruvi',
+    appShort: 'Diktantlar',
     appTitle: 'Diktant tekshiruvi — elektron jurnal',
     groups: 'Guruhlar',
     settings: 'Sozlamalar',
